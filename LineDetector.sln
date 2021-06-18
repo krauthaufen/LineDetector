@@ -1,0 +1,30 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.31129.286
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = ".paket", ".paket", "{215E05B8-AFAE-421F-A64C-F5F46A86A3BB}"
+	ProjectSection(SolutionItems) = preProject
+		paket.dependencies = paket.dependencies
+	EndProjectSection
+EndProject
+Project("{6EC3EE1D-3C4E-46DD-8F32-0CC8E7565705}") = "LineDetector.Demo", "src\LineDetector.Demo\LineDetector.Demo.fsproj", "{8AB73A8E-A393-4C8D-AD37-BB5CD70F8855}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8AB73A8E-A393-4C8D-AD37-BB5CD70F8855}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8AB73A8E-A393-4C8D-AD37-BB5CD70F8855}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8AB73A8E-A393-4C8D-AD37-BB5CD70F8855}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8AB73A8E-A393-4C8D-AD37-BB5CD70F8855}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {3CC35045-7375-4538-8BAC-FA963F704544}
+	EndGlobalSection
+EndGlobal
