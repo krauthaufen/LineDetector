@@ -36,8 +36,88 @@ type PlaneFitInfo =
     
 and [<Struct>] Regression2d(sumSq : V3d, sum : V2d, ref : V2d, count : int, mass : float) =
         
-    static member Empty = Regression2d(V3d.Zero, V2d.Zero, V2d.Zero, 0, 0.0)
+    static let getEigenvalues (sumSq : V3d) (sum : V2d) (mass : float) = 
+        let a = sum / mass
+        let ixx = sumSq.Y - mass*sqr a.Y
+        let iyy = sumSq.X - mass*sqr a.X
+        let ixy = mass*a.X*a.Y - sumSq.Z
+        let mutable struct(a, b) = Polynomial.RealRootsOfNormed(-(iyy+ixx), ixx*iyy - sqr ixy)
+        if a < b then Fun.Swap(&a, &b)
+        V2d(a,b)
 
+    static let decomposeInertia (sumSq : V3d) (sum : V2d) (mass : float) =
+        // https://en.wikipedia.org/wiki/Parallel_axis_theorem
+        let a = sum / mass
+        let ixx = sumSq.Y - mass*sqr a.Y
+        let iyy = sumSq.X - mass*sqr a.X
+        let ixy = mass*a.X*a.Y - sumSq.Z
+
+        //// (m.M00 - a) * (m.M11 - a) - m.M01*m.M10 = 0
+        //// m.M00*m.M11 - a*(m.M11 + m.M00) + a^2 - m.M01*m.M10
+        //// a^2 + a*-(m.M11 + m.M00) + (m.M00*m.M11 - m.M01*m.M10)
+        let mutable struct(a, b) = Polynomial.RealRootsOfNormed(-(iyy+ixx), ixx*iyy - sqr ixy)
+
+        if a < b then Fun.Swap(&a, &b)
+
+        if System.Double.IsNaN a || System.Double.IsNaN b then
+            struct(M22d.Identity, V2d.Zero)
+        else
+            let a0 = V2d(ixx - a, ixy).Rot90
+            let a1 = V2d(ixy, iyy - a).Rot90
+            //let b0 = V2d(ixx - b, ixy).Rot90
+            //let b1 = V2d(ixy, iyy - b).Rot90
+
+            let la0 = Vec.lengthSquared a0
+            let la1 = Vec.lengthSquared a1
+            //let lb0 = Vec.lengthSquared b0
+            //let lb1 = Vec.lengthSquared b1
+
+            //let mutable x = V2d.Zero
+            //let mutable y = V2d.Zero
+
+            let x = 
+                if la0 > la1 then a0 / sqrt la0
+                else a1 / sqrt la1
+            let y = x.Rot90
+
+
+            //if la0 > la1 then
+            //    if la0 > lb0 then
+            //        if la0 > lb1 then  
+            //            x <- a0 / sqrt la0
+            //            y <- x.Rot90
+            //        else 
+            //            y <- b1 / sqrt lb1
+            //            x <- y.Rot270
+            //    else
+            //        if lb0 > lb1 then 
+            //            y <- b0 / sqrt lb0
+            //            x <- y.Rot270
+            //        else 
+            //            y <- b1 / sqrt lb1
+            //            x <- y.Rot270
+            //else
+            //    if la1 > lb0 then
+            //        if la1 > lb1 then 
+            //            x <- a1 / sqrt la1
+            //            y <- x.Rot90
+            //        else 
+            //            y <- b1 / sqrt lb1
+            //            x <- y.Rot270
+            //    else
+            //        if lb0 > lb1 then 
+            //            y <- b0 / sqrt lb0
+            //            x <- y.Rot270
+            //        else 
+            //            y <- b1 / sqrt lb1
+            //            x <- y.Rot270
+
+            struct(M22d.FromCols(x,y), V2d(a, b))
+
+
+
+    static member Empty = Regression2d(V3d.Zero, V2d.Zero, V2d.Zero, 0, 0.0)
+     
 
             
 
@@ -87,43 +167,40 @@ and [<Struct>] Regression2d(sumSq : V3d, sum : V2d, ref : V2d, count : int, mass
                 
     member x.GetQuality() =
         if count >= 2 then
-            match SVD.Decompose x.InertiaTensor with
-            | Some (_u, s, _vt) -> 
-                let stddev = abs s.Diagonal / mass |> sqrt
-                let r = abs stddev.X / (abs stddev.X + abs stddev.Y) 
-                2.0 * r - 1.0
-            | None -> 0.0
+            let s = getEigenvalues sumSq sum mass
+            let stddev = abs s / mass |> sqrt
+            let r = abs stddev.X / (abs stddev.X + abs stddev.Y) 
+            2.0 * r - 1.0
         else
             0.0
             
 
     member x.GetStdDevRatio() =
         if count >= 2 then
-            match SVD.Decompose x.InertiaTensor with
-            | Some (_u, s, _vt) -> 
-                let stddev = abs s.Diagonal / mass |> sqrt
-                abs stddev.X / abs stddev.Y
-            | None -> 0.0
+            let s = getEigenvalues sumSq sum mass
+            let stddev = abs s / mass |> sqrt
+            abs stddev.X / abs stddev.Y
         else
             0.0
+
+
     member x.TryGetPlaneInfo() =
         if count >= 2 then
-            match SVD.Decompose x.InertiaTensor with
-            | Some (u, s, _vt) ->
+            let struct(u, s) = decomposeInertia sumSq sum mass
+            if s.X <= 0.0 then
+                None
+            else
                 let avg = x.Center
-
                 let x = u.C1
                 let y = u.C0
                 Some {
                     Plane = Plane2d(y, avg)
                     Trafo = Trafo2d.FromBasis(x, y, avg)
-                    StdDev = abs s.Diagonal / mass |> sqrt
+                    StdDev = abs s / mass |> sqrt
                     Center = avg
                     Count = count
                     Mass = mass
                 }
-            | None ->
-                None
         else
             None
                 
@@ -430,6 +507,27 @@ type LineGraph() =
 
 
 module LineDetector =
+
+    let private par (blocks : V2i) (mat : NativeMatrix<'a>) (action : V2i -> NativeMatrix<'a> -> unit) =
+        if blocks.AllSmallerOrEqual 1 then
+            action V2i.Zero mat
+        else
+            let s = V2d mat.Size / V2d blocks |> ceil |> V2i
+            let matrices =
+                [|
+                    for y in 0 .. blocks.Y - 1 do
+                        for x in 0 .. blocks.X - 1 do
+                            let offset = s * V2i(x,y)
+                            let size = min s (V2i mat.Size - offset)
+                            offset, mat.SubMatrix(offset, size)
+                |]
+
+            System.Threading.Tasks.Parallel.ForEach(matrices, fun (offset, mat) -> action offset mat) |> ignore
+
+
+
+
+
     let detectLines (image : PixImage<byte>) =  
         
         let threshold = 0.4
@@ -443,118 +541,127 @@ module LineDetector =
         use img = image.ToImage()
         img.Mutate (fun ctx ->
             
-            ctx.Grayscale()
-                //.HistogramEqualization()
-                //.GaussianBlur(2.0f)
-                .DetectEdges(EdgeDetectorKernel.Laplacian3x3, true)
+            ctx.DetectEdges(EdgeDetectorKernel.Laplacian3x3, true)
             |> ignore
         )
 
-        img.SaveAsJpeg @"C:\Users\Schorsch\Desktop\bla.png"
         let edges = img.ToPixImage().ToPixImage<byte>()
         Log.stop()
-
-        let size = edges.Size
-
-        let lines = System.Collections.Generic.List()
-
+        
+        let globalLines = System.Collections.Generic.List()
 
         Log.startTimed "finding lines"
         NativeMatrix.using (edges.GetChannel 0L) (fun pEdges ->
             
-            pEdges |> NativeMatrix.iter (fun c v ->
-                let c = V2i c
-                let v = float v / 255.0
-                if v >= threshold then
-                    let mutable r = Regression2d.Empty
+            let blocks = V2i.II
+                //let threads = System.Environment.ProcessorCount
+                //let mutable x = sqrt (float threads) |> floor |> int
+                //while threads % x <> 0 do
+                //    x <- x - 1
+                //let y = threads / x
+                //V2i(y, x)
 
-                    let regressionStable (r : Regression2d) =
-                        if r.Count >= 4 then
-                            match r.TryGetPlaneInfo() with
-                            | Some i ->
-                                i.Quality > minStability
-                                //if Fun.IsTiny i.StdDev.Y then
-                                //    i.StdDev.X >= minStability
-                                //else
-                                //    let r = i.StdDev.X / i.StdDev.Y
-                                //    r >= minStability
-                            | None ->
+            par blocks pEdges (fun offset pEdges ->
+                let lines = System.Collections.Generic.List()
+                
+                let size = V2i pEdges.Size
+
+                pEdges |> NativeMatrix.iter (fun c v ->
+                    let c = V2i c
+                    let v = float v / 255.0
+                    if v >= threshold then
+                        let mutable r = Regression2d.Empty
+
+                        let regressionStable (r : Regression2d) =
+                            if r.Count >= 4 then
+                                match r.TryGetPlaneInfo() with
+                                | Some i ->
+                                    i.Quality > minStability
+                                    //if Fun.IsTiny i.StdDev.Y then
+                                    //    i.StdDev.X >= minStability
+                                    //else
+                                    //    let r = i.StdDev.X / i.StdDev.Y
+                                    //    r >= minStability
+                                | None ->
+                                    false
+                            else
                                 false
-                        else
-                            false
 
-                    do
-                        let queue = System.Collections.Generic.List()
-                        let queueHash = System.Collections.Generic.HashSet()
-                        queue.HeapEnqueue(cmp, struct(v, c))
-                        queueHash.Add c |> ignore
-
-                        while r.Count < maxGuessCount && queue.Count > 0 && not (regressionStable r) do
-                            let struct(v, e) = queue.HeapDequeue(cmp)
-                            r <- r.Add(V2d e + V2d.Half, v)
-
-                            for no in neighbours do
-                                let n = e + no
-                                if n.AllGreaterOrEqual 0 && n.AllSmaller size then
-                                    if queueHash.Add n then
-                                        let v = float pEdges.[n] / 255.0
-                                        if v >= growThreshold then
-                                            queue.HeapEnqueue(cmp, struct(v, n))
-
-                    if regressionStable r then
-                        match r.TryGetPlaneInfo() with
-                        | Some info when abs (info.Plane.Height(V2d c + V2d.Half)) <= tolerance ->
-                            let mutable info = info
-                            r <- Regression2d.Empty
-                            let queue = System.Collections.Generic.Queue()
+                        do
+                            let queue = System.Collections.Generic.List()
                             let queueHash = System.Collections.Generic.HashSet()
-                            queue.Enqueue(c)
+                            queue.HeapEnqueue(cmp, struct(v, c))
                             queueHash.Add c |> ignore
 
-                            let all = System.Collections.Generic.HashSet()
+                            while r.Count < maxGuessCount && queue.Count > 0 && not (regressionStable r) do
+                                let struct(v, e) = queue.HeapDequeue(cmp)
+                                r <- r.Add(V2d e + V2d offset + V2d.Half, v)
 
-                            while queue.Count > 0 do
-                                let pi = queue.Dequeue()
-                                let vi = float pEdges.[pi] / 255.0
-                                let err = abs (info.Plane.Height (V2d pi))
-                                if vi >= growThreshold && err <= tolerance then
-                                    all.Add pi |> ignore
-                                    r <- r.Add(V2d pi + V2d.Half, vi)
-                                    if regressionStable r then
-                                        match r.TryGetPlaneInfo() with
-                                        | Some i -> info <- i
-                                        | None -> ()
-                                    for no in neighbours do
-                                        let n = pi + no
-                                        if n.AllGreaterOrEqual 0 && n.AllSmaller size then
-                                            if queueHash.Add n then queue.Enqueue n
+                                for no in neighbours do
+                                    let n = e + no
+                                    if n.AllGreaterOrEqual 0 && n.AllSmaller size then
+                                        if queueHash.Add n then
+                                            let v = float pEdges.[n] / 255.0
+                                            if v >= growThreshold then
+                                                queue.HeapEnqueue(cmp, struct(v, n))
 
-                            if all.Count > 1 then
-                                let n = 0.5 * info.Plane.Normal + V2d.Half
+                        if regressionStable r then
+                            match r.TryGetPlaneInfo() with
+                            | Some info when abs (info.Plane.Height(V2d c + V2d offset + V2d.Half)) <= tolerance ->
+                                let mutable info = info
+                                r <- Regression2d.Empty
+                                let queue = System.Collections.Generic.Queue()
+                                let queueHash = System.Collections.Generic.HashSet()
+                                queue.Enqueue(c)
+                                queueHash.Add c |> ignore
 
+                                let all = System.Collections.Generic.HashSet()
 
-                                let ray = Ray2d(info.Center, info.XAxis)
-                                let mutable tRange = Range1d.Invalid
+                                while queue.Count > 0 do
+                                    let pi = queue.Dequeue()
+                                    let vi = float pEdges.[pi] / 255.0
+                                    let err = abs (info.Plane.Height (V2d pi + V2d offset + V2d.Half))
+                                    if vi >= growThreshold && err <= tolerance then
+                                        all.Add pi |> ignore
+                                        r <- r.Add(V2d pi + V2d offset + V2d.Half, vi)
+                                        if regressionStable r then
+                                            match r.TryGetPlaneInfo() with
+                                            | Some i -> info <- i
+                                            | None -> ()
+                                        for no in neighbours do
+                                            let n = pi + no
+                                            if n.AllGreaterOrEqual 0 && n.AllSmaller size then
+                                                if queueHash.Add n then queue.Enqueue n
 
-                                for a in all do 
-                                    let t = ray.GetClosestPointTOn (V2d a)
-                                    tRange.ExtendBy t
-                                    pEdges.[a] <- 0uy
-                                if tRange.Size >= minLength then
-                                    lines.Add {
-                                        regression = r
-                                        info = info
-                                        line = Line2d(ray.GetPointOnRay tRange.Min, ray.GetPointOnRay tRange.Max)
-                                    }
-                        | _ ->
-                            ()
+                                if all.Count > 1 then
+                                    let ray = Ray2d(info.Center, info.XAxis)
+                                    let mutable tRange = Range1d.Invalid
+
+                                    for a in all do 
+                                        let t = ray.GetClosestPointTOn (V2d a + V2d offset + V2d.Half)
+                                        tRange.ExtendBy t
+                                        pEdges.[a] <- 0uy
+                                    if tRange.Size >= minLength then
+                                        lines.Add {
+                                            regression = r
+                                            info = info
+                                            line = Line2d(ray.GetPointOnRay tRange.Min, ray.GetPointOnRay tRange.Max)
+                                        }
+                            | _ ->
+                                ()
+
+                )
+
+                lock globalLines (fun () ->
+                    globalLines.AddRange lines
+                )
 
             )
 
         )
         Log.stop()
 
-        CSharpList.toArray lines
+        CSharpList.toArray globalLines
 
     let mergeLines (lines : DetectedLine[])  =
     

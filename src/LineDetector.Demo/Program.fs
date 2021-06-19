@@ -6,8 +6,9 @@ open LineDetector
 let main _args =
     Aardvark.Init()
 
-    let img = PixImage.Create @"C:\Users\Schorsch\Desktop\Brusher\Datasets\orange\DSC02289.JPG"
+    let img = PixImage.Create @"C:\Users\Schorsch\Desktop\Brusher\Datasets\facade-fulton\DSC02305.JPG"
 
+    Log.startTimed "detection %dx%d" img.Size.X img.Size.Y
     Log.startTimed "detecting lines"
     let lines = LineDetector.detectLines (img.ToPixImage<byte>())
     Log.line "%d lines found" lines.Length
@@ -21,6 +22,7 @@ let main _args =
     let newLines = newLines |> Array.filter (fun d -> d.info.Quality > 0.9 && d.info.Quality < 0.999)
     Log.line "%d lines" newLines.Length
     Log.stop()
+    Log.stop()
     
     let img = img.ToPixImage<byte>(Col.Format.RGBA)
     let mat = img.GetMatrix<C4b>()
@@ -30,11 +32,11 @@ let main _args =
         let info = d.info
         let color = rand.UniformC3f().ToC4b()
         let n = d.line.Plane2d.Normal |> Vec.normalize
-        for o in [V2d.Zero] do 
+        for o in [V2d.Zero;-n;n] do 
             mat.SetLine(o+d.line.P0, o+d.line.P1, color)
 
 
 
-    img.SaveAsImage @"C:\Users\Schorsch\Desktop\grad.png"
+    img.SaveAsImage @"C:\Users\Schorsch\Desktop\grad.jpg"
 
     0
