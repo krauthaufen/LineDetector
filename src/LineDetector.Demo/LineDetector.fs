@@ -5,6 +5,7 @@ open Aardvark.Geometry
 open SixLabors.ImageSharp
 open SixLabors.ImageSharp.Processing
 open SixLabors.ImageSharp.Processing.Processors.Convolution
+open Microsoft.FSharp.NativeInterop
 
 [<Struct>]
 type PlaneFitInfo =
@@ -250,8 +251,8 @@ and [<Struct>] Regression2d(sumSq : V3d, sum : V2d, ref : V2d, count : int, mass
 module private LineDetectionHelpers =
     let neighbours =
         [|
-            for x in -2 .. 2 do
-                for y in -2 .. 2 do
+            for x in -1 .. 1 do
+                for y in -1 .. 1 do
                     if x <> 0 || y <> 0 then yield V2i(x,y)
         |]
 
@@ -264,6 +265,8 @@ module private LineDetectionHelpers =
 type DetectedLine =
     {
         regression  : Regression2d
+        stddev      : float
+        avgResponse : float
         line        : Line2d
         info        : PlaneFitInfo
     }
@@ -531,21 +534,95 @@ module LineDetector =
     let detectLines (image : PixImage<byte>) =  
         
         let threshold = 0.4
-        let growThreshold = 0.1
+        let growThreshold = 0.2
         let tolerance = 3.5
         let minLength = 4.0
         let minStability = 0.8
-        let maxGuessCount = 40
+        let maxGuessCount = 20
 
         Log.startTimed "detecting edges"
-        use img = image.ToImage()
-        img.Mutate (fun ctx ->
-            
-            ctx.DetectEdges(EdgeDetectorKernel.Laplacian3x3, true)
-            |> ignore
+
+        let edges = PixImage<byte>(Col.Format.Gray, image.Size)
+
+        NativeMatrix.using (edges.GetChannel 0L) (fun pEdges ->
+            NativeVolume.using (image.Volume) (fun pSrc ->
+
+                let offsets =
+                    [|
+                        struct( 8, 0L)
+                        struct(-1, pSrc.DX)
+                        struct(-1,-pSrc.DX)
+                        struct(-1, pSrc.DY)
+                        struct(-1,-pSrc.DY)
+                        struct(-1, pSrc.DX + pSrc.DY)
+                        struct(-1, pSrc.DX - pSrc.DY)
+                        struct(-1,-pSrc.DX + pSrc.DY)
+                        struct(-1,-pSrc.DX - pSrc.DY)
+                    |]
+
+                let edgeInfo = pEdges.Info.SubMatrix(V2l.II, pEdges.Size - 2L*V2l.II)
+                let srcInfo = pSrc.Info.SubXYMatrix(0L).SubMatrix(V2l.II, pEdges.Size - 2L*V2l.II)
+
+                let readGrayValue =
+                    match image.Format with
+                    | Col.Format.Gray -> 
+                        fun (ptr : nativeptr<byte>) -> NativePtr.read ptr
+                    | Col.Format.RGB | Col.Format.RGBA ->
+                        let go = int pSrc.DZ
+                        let bo = int pSrc.DZ <<< 1
+                        fun (ptr : nativeptr<byte>) -> C3b(NativePtr.read ptr, NativePtr.get ptr go, NativePtr.get ptr bo).ToGrayByte()
+                        
+                    | Col.Format.BGR | Col.Format.BGRA ->
+                        let go = int pSrc.DZ
+                        let ro = int pSrc.DZ <<< 1
+                        fun (ptr : nativeptr<byte>) -> C3b(NativePtr.get ptr ro, NativePtr.get ptr go, NativePtr.read ptr).ToGrayByte()
+                    | fmt ->
+                        failwithf "bad format: %A" fmt
+
+                edgeInfo.ForeachIndex(srcInfo, fun (ei : int64) (si : int64) ->
+                    
+                    //let mutable sum = 0
+                    //let src = NativePtr.add pSrc.Pointer (int si)
+                    //for struct(w, o) in offsets do
+                    //    let ptr = NativePtr.add src (int o)
+                    //    let v = readGrayValue ptr |> int
+                    //    sum <- sum + w*v
+
+                    //let value = sum |> clamp 0 255 |> byte
+                    //NativePtr.set pEdges.Pointer (int ei) value
+
+                    let mutable maxValue = 0uy
+                    for i in 0L .. pSrc.SZ - 1L do
+                        let src = NativePtr.add pSrc.Pointer (int (si + i * pSrc.DZ))
+                        let mutable sum = 0
+                        for struct(w, o) in offsets do
+                            let v = int (NativePtr.get src (int o))
+                            sum <- sum + w*v
+                        let value = sum |> clamp 0 255 |> byte
+                        
+                        //channelSum <- channelSum + int value
+                        if value > maxValue then maxValue <- value
+
+                    //let res = (float channelSum / float pSrc.SZ) |> round |> byte
+
+                    NativePtr.set pEdges.Pointer (int ei) maxValue
+
+                )
+            )
         )
 
-        let edges = img.ToPixImage().ToPixImage<byte>()
+        //edges.SaveAsImage @"C:\Users\Schorsch\Desktop\bla.jpg"
+
+        //use img = image.ToImage()
+        //img.Mutate (fun ctx ->
+            
+        //    ctx.DetectEdges(EdgeDetector2DKernel.SobelKernel, true)
+        //    |> ignore
+        //)
+        
+        //img.SaveAsJpeg @"C:\Users\Schorsch\Desktop\bla2.jpg"
+
+        //let edges = img.ToPixImage().ToPixImage<byte>()
         Log.stop()
         
         let globalLines = System.Collections.Generic.List()
@@ -574,16 +651,7 @@ module LineDetector =
 
                         let regressionStable (r : Regression2d) =
                             if r.Count >= 4 then
-                                match r.TryGetPlaneInfo() with
-                                | Some i ->
-                                    i.Quality > minStability
-                                    //if Fun.IsTiny i.StdDev.Y then
-                                    //    i.StdDev.X >= minStability
-                                    //else
-                                    //    let r = i.StdDev.X / i.StdDev.Y
-                                    //    r >= minStability
-                                | None ->
-                                    false
+                                r.GetQuality() > minStability
                             else
                                 false
 
@@ -617,11 +685,16 @@ module LineDetector =
 
                                 let all = System.Collections.Generic.HashSet()
 
+                                let mutable sum = 0.0
+                                let mutable sumSq = 0.0
+
                                 while queue.Count > 0 do
                                     let pi = queue.Dequeue()
                                     let vi = float pEdges.[pi] / 255.0
                                     let err = abs (info.Plane.Height (V2d pi + V2d offset + V2d.Half))
                                     if vi >= growThreshold && err <= tolerance then
+                                        sum <- sum + vi
+                                        sumSq <- sumSq + sqr vi
                                         all.Add pi |> ignore
                                         r <- r.Add(V2d pi + V2d offset + V2d.Half, vi)
                                         if regressionStable r then
@@ -641,10 +714,18 @@ module LineDetector =
                                         let t = ray.GetClosestPointTOn (V2d a + V2d offset + V2d.Half)
                                         tRange.ExtendBy t
                                         pEdges.[a] <- 0uy
+
                                     if tRange.Size >= minLength then
+                                        let avg = sum / float all.Count
+                                        let avgSq = sumSq / float all.Count
+
+                                        let var = (sumSq - float all.Count * sqr avg) / float (all.Count - 1)
+
                                         lines.Add {
                                             regression = r
                                             info = info
+                                            avgResponse = avg
+                                            stddev = sqrt var
                                             line = Line2d(ray.GetPointOnRay tRange.Min, ray.GetPointOnRay tRange.Max)
                                         }
                             | _ ->
@@ -663,10 +744,8 @@ module LineDetector =
 
         CSharpList.toArray globalLines
 
-    let mergeLines (lines : DetectedLine[])  =
+    let mergeLines (radius : float) (lines : DetectedLine[])  =
     
-        let radius = 20.0
-
         let linePoints = Array.zeroCreate (2 * lines.Length)
         let mutable oi = 0
         for i in 0 .. lines.Length - 1 do
@@ -799,7 +878,7 @@ module LineDetector =
                         graph.Remove ri |> ignore
                         visited.Remove li |> ignore
                         visited.Add ri |> ignore
-                        traverse visited li { regression = hReg; info = hInfo; line = hLine }
+                        traverse visited li { regression = hReg; info = hInfo; line = hLine; stddev = lInfo.stddev; avgResponse = lInfo.avgResponse }
                     | None ->
                         output.Add lInfo
                         for KeyValue(ri, _) in conn do

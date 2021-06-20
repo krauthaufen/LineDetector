@@ -6,7 +6,12 @@ open LineDetector
 let main _args =
     Aardvark.Init()
 
-    let img = PixImage.Create @"C:\Users\Schorsch\Desktop\Brusher\Datasets\facade-fulton\DSC02305.JPG"
+    let img = PixImage.Create @"C:\Users\Schorsch\Desktop\Brusher\Datasets\H1_29\IMG_7761.JPG"
+    //let img = 
+    //    let dst = PixImage<byte>(Col.Format.Gray, img.Size)
+    //    let src = img.ToPixImage<byte>().GetMatrix<C4b>()
+    //    dst.GetChannel(0L).SetMap(src, System.Func<_,_>(fun (c : C4b) -> c.ToGrayByte())) |> ignore
+    //    dst
 
     Log.startTimed "detection %dx%d" img.Size.X img.Size.Y
     Log.startTimed "detecting lines"
@@ -14,12 +19,12 @@ let main _args =
     Log.line "%d lines found" lines.Length
     Log.stop()
     Log.startTimed "merging lines"
-    let newLines = LineDetector.mergeLines lines
-    Log.line "%d lines" lines.Length
+    let newLines = LineDetector.mergeLines 20.0 lines
+    Log.line "%d lines" newLines.Length
     Log.stop()
     
     Log.startTimed "filtering lines"
-    let newLines = newLines |> Array.filter (fun d -> d.info.Quality > 0.9 && d.info.Quality < 0.999)
+    let newLines = newLines |> Array.filter (fun d ->  Vec.distance d.line.P0 d.line.P1 >= 40.0 && d.info.Quality > 0.7 && d.info.Quality < 0.999)
     Log.line "%d lines" newLines.Length
     Log.stop()
     Log.stop()
