@@ -12,12 +12,13 @@ open Microsoft.FSharp.NativeInterop
 [<Struct>]
 type PlaneFitInfo =
     {
-        Trafo       : Trafo2d
-        Plane       : Plane2d
-        StdDev      : V2d
-        Center      : V2d
-        Count       : int
-        Mass        : float
+        Trafo           : Trafo2d
+        Plane           : Plane2d
+        StdDev          : V2d
+        Center          : V2d
+        Count           : int
+        Mass            : float
+        AngularError    : float
     }
 
     member x.Quality =
@@ -194,8 +195,31 @@ and [<Struct>] Regression2d(sumSq : V3d, sum : V2d, ref : V2d, count : int, mass
                 None
             else
                 let avg = x.Center
+                
+                let ev = abs s
+                let measurementNoise = ev.Y / (x.Mass * float x.Count)
+                let noiseCov = 4.0 * ev * measurementNoise
+                let inline fppf (x : float) (d1 : int) (d2 : int) =
+                    FDistr.invCDF (float d1) (float d2) x
+
+                let inline fisherStatistic (n : int) (confidence : float) (dof : int) : float =
+                    fppf confidence dof (n - dof)
+                
+                let inline applyErrorScaling (nominal : V2d) (err : V2d) (n : int) : V2d =
+                    nominal * V2d.PN - err |> abs
+
+
+                let z = fisherStatistic x.Count 0.95 x.Count
+                let err = z * sqrt noiseCov
+                
+                let hyp = applyErrorScaling ev err x.Count
+                let n = hyp |> sqrt
+                let angle = atan2 n.Y n.X
+
                 let x = u.C1
                 let y = u.C0
+
+
                 Some {
                     Plane = Plane2d(y, avg)
                     Trafo = Trafo2d.FromBasis(x, y, avg)
@@ -203,6 +227,7 @@ and [<Struct>] Regression2d(sumSq : V3d, sum : V2d, ref : V2d, count : int, mass
                     Center = avg
                     Count = count
                     Mass = mass
+                    AngularError = angle
                 }
         else
             None
@@ -521,6 +546,7 @@ type LineDetectionConfig =
         MaxGuessCount       : int   //= 20
         MergeRadius         : float //= 20.0
         MinQuality          : float //= 0.8
+        Threads             : int
     }
 
     static member Default =
@@ -528,11 +554,56 @@ type LineDetectionConfig =
             Threshold           = 0.4
             GrowThreshold       = 0.1
             Tolerance           = 3.5
-            MinLength           = 20.0
+            MinLength           = 10.0
             MinStability        = 0.8
             MaxGuessCount       = 20
             MergeRadius         = 20.0
-            MinQuality          = 0.9
+            MinQuality          = 0.8
+            Threads             = 0
+        }
+
+module Dither =
+    let matrix =
+        let ass = typeof<LineDetectionConfig>.Assembly
+
+        let resName = 
+            ass.GetManifestResourceNames()
+            |> Array.find (fun n -> n.EndsWith "forced-1024.bin")
+
+        use s = ass.GetManifestResourceStream resName
+        use r = new System.IO.BinaryReader(s)
+        let res = Array.zeroCreate (int (s.Length / 4L))
+
+        for i in 0 .. res.Length - 1 do
+            res.[i] <- r.ReadInt32()
+
+        Matrix<int>(res, 0L, V2l(1024, 1024), V2l(1L, 1024L))
+
+    let coords =
+        let l = Array.zeroCreate (int matrix.SX * int matrix.SY)
+        matrix.ForeachXYIndex(fun x y i ->
+            let v = matrix.[i]
+            l.[v] <- V2i(int x, int y)
+        )
+        l
+
+    let getCoords (size : V2i) =
+        let blocks = ceil (V2d size / V2d matrix.Size) |> V2i
+
+        seq {
+            for by in 0 .. blocks.Y-1 do
+                for bx in 0 .. blocks.X-1 do
+                    let o = V2i(bx, by) * V2i matrix.Size
+
+                    if (o + V2i matrix.Size).AllSmaller size then
+                        if o = V2i.Zero then yield! coords
+                        else yield! coords |> Seq.map (fun c -> c + o)
+                    else
+                        for c in coords do
+                            let cc = o + c
+                            if cc.AllSmaller size then
+                                yield cc
+                        
         }
 
 
@@ -554,9 +625,44 @@ module LineDetector =
 
             System.Threading.Tasks.Parallel.ForEach(matrices, fun (offset, mat) -> action offset mat) |> ignore
 
-    
+    module MatrixInfo =
+        let iter2 (threads : int) (action : int64 -> int64 -> unit) (a : MatrixInfo) (b : MatrixInfo) =
+            let action = OptimizedClosures.FSharpFunc<_,_,_>.Adapt action
+            let threads = if threads <= 0 then System.Environment.ProcessorCount else threads
 
-    let private edgeDetectLaplace (image : PixImage<byte>) =
+            if threads > 1 then
+                let blockSize = V2i(128, 128)
+                let blockCount = V2d a.Size / V2d blockSize |> ceil |> V2i
+
+                let blocks =
+                    seq {
+                        for by in 0 .. blockCount.Y - 1 do
+                            for bx in 0 .. blockCount.X - 1 do
+                                let o = V2i(bx,by) * blockSize
+                                let s = 
+                                    let e = min (o + blockSize) (V2i a.Size)
+                                    e - o
+
+                                yield a.SubMatrix(o, s), b.SubMatrix(o, s)
+
+                    }
+
+                let action =
+                    System.Action<_>(fun (ab : MatrixInfo, bb : MatrixInfo) ->
+                        ab.ForeachIndex(bb, fun ai bi ->
+                            action.Invoke(ai, bi)
+                        )
+                    )
+
+                let o = System.Threading.Tasks.ParallelOptions(MaxDegreeOfParallelism = threads)
+                System.Threading.Tasks.Parallel.ForEach(blocks, o, action) |> ignore
+            else
+                a.ForeachIndex(b, fun ai bi ->
+                    action.Invoke(ai, bi)
+                )
+
+    
+    let private edgeDetectLaplace (threads : int) (image : PixImage<byte>) =
         let edges = PixImage<byte>(Col.Format.Gray, image.Size)
 
         NativeMatrix.using (edges.GetChannel 0L) (fun pEdges ->
@@ -586,7 +692,7 @@ module LineDetector =
                         let go = int pSrc.DZ
                         let bo = int pSrc.DZ <<< 1
                         fun (ptr : nativeptr<byte>) -> C3b(NativePtr.read ptr, NativePtr.get ptr go, NativePtr.get ptr bo).ToGrayByte()
-                        
+                            
                     | Col.Format.BGR | Col.Format.BGRA ->
                         let go = int pSrc.DZ
                         let ro = int pSrc.DZ <<< 1
@@ -594,11 +700,13 @@ module LineDetector =
                     | fmt ->
                         failwithf "bad format: %A" fmt
 
-                edgeInfo.ForeachIndex(srcInfo, fun (ei : int64) (si : int64) ->
-                    
+                (edgeInfo, srcInfo) ||> MatrixInfo.iter2 threads (fun (ei : int64) (si : int64) ->
+                //edgeInfo.ForeachIndex(srcInfo, fun (ei : int64) (si : int64) ->
+                        
                     let mutable maxValue = 0uy
+                    let mutable oo = 0L
                     for i in 0L .. pSrc.SZ - 1L do
-                        let src = NativePtr.add pSrc.Pointer (int (si + i * pSrc.DZ))
+                        let src = NativePtr.add pSrc.Pointer (int (si + oo))
                         let mutable sum = 0
                         for struct(w, o) in offsets do
                             let v = int (NativePtr.get src (int o))
@@ -606,6 +714,7 @@ module LineDetector =
                         let value = sum |> clamp 0 255 |> byte
 
                         if value > maxValue then maxValue <- value
+                        oo <- oo + pSrc.DZ
 
                     NativePtr.set pEdges.Pointer (int ei) maxValue
 
@@ -614,7 +723,9 @@ module LineDetector =
         )
 
         edges
+       
 
+    open System.Threading
 
     let private detectLines (config : LineDetectionConfig) (image : PixImage<byte>) =  
         
@@ -626,21 +737,21 @@ module LineDetector =
         //let configMaxGuessCount = 20
 
         Log.startTimed "detecting edges"
-        let edges = edgeDetectLaplace image
+        let edges = edgeDetectLaplace 1 image
         Log.stop()
         
         let globalLines = System.Collections.Generic.List()
 
-        let regions = PixImage<byte>(Col.Format.RGBA, image.Size)
-        let mutable rm = regions.GetMatrix<C4b>()
-        rm.SetMap(edges.GetChannel 0L, fun v -> C4b(v,v,v,255uy)) |> ignore
+        //let regions = PixImage<byte>(Col.Format.RGBA, image.Size)
+        //let mutable rm = regions.GetMatrix<C4b>()
+        //rm.SetMap(edges.GetChannel 0L, fun v -> C4b(v,v,v,255uy)) |> ignore
+
 
         Log.startTimed "finding lines"
         NativeMatrix.using (edges.GetChannel 0L) (fun pEdges ->
-            let rand = RandomSystem()
 
             let blocks = V2i.II
-                //let threads = System.Environment.ProcessorCount
+                //let threads = 8 * System.Environment.ProcessorCount
                 //let mutable x = sqrt (float threads) |> floor |> int
                 //while threads % x <> 0 do
                 //    x <- x - 1
@@ -722,14 +833,13 @@ module LineDetector =
                                 if all.Count > 1 then
                                     let ray = Ray2d(info.Center, info.XAxis)
                                     let mutable tRange = Range1d.Invalid
-                                    let c = rand.UniformC3f().ToC4b()
 
                                     for a in all do 
                                         let t = ray.GetClosestPointTOn (V2d a + V2d offset + V2d.Half)
                                         tRange.ExtendBy t
                                         let v = float pEdges.[a] / 255.0
                                         pEdges.[a] <- 0uy
-                                        rm.[a] <- (c.ToC3f() * float32 v).ToC4b()
+                                        //rm.[a] <- (c.ToC3f() * float32 v).ToC4b()
 
                                     if tRange.Size >= config.MinLength then
                                         let avg = sum / float all.Count
@@ -739,7 +849,7 @@ module LineDetector =
 
                                         let line = Line2d(ray.GetPointOnRay tRange.Min, ray.GetPointOnRay tRange.Max)
 
-                                        rm.SetLine(line.P0, line.P1, C4b(255uy - c.R, 255uy - c.G, 255uy - c.B, 255uy))
+                                        //rm.SetLine(line.P0, line.P1, C4b(255uy - c.R, 255uy - c.G, 255uy - c.B, 255uy))
 
                                         lines.Add {
                                             regression = r
@@ -762,13 +872,134 @@ module LineDetector =
         )
         Log.stop()
 
-        regions.SaveAsImage (sprintf @"C:\Users\Schorsch\Desktop\debug\%A.jpg" (System.Guid.NewGuid()))
+        //regions.SaveAsImage (sprintf @"C:\Users\Schorsch\Desktop\debug\%A.jpg" (System.Guid.NewGuid()))
 
 
         CSharpList.toArray globalLines
+   
+    let private detectLinesPar (config : LineDetectionConfig) (image : PixImage<byte>) =  
+        let threads = if config.Threads <= 0 then System.Environment.ProcessorCount else config.Threads
+        
+        if threads = 1 then
+            detectLines config image
+        else
+            Log.startTimed "detecting edges"
+            let edges = edgeDetectLaplace threads image
+            Log.stop()
 
-    let private mergeLines (radius : float) (lines : DetectedLine[])  =
-    
+            let lines = System.Collections.Concurrent.ConcurrentBag()
+            Log.startTimed "finding lines"
+            NativeMatrix.using (edges.GetChannel 0L) (fun pEdges ->
+                let size = V2i pEdges.Size
+                let coords = Dither.getCoords size
+                let o = System.Threading.Tasks.ParallelOptions(MaxDegreeOfParallelism = threads)
+                System.Threading.Tasks.Parallel.ForEach(coords, o, fun (c : V2i) ->
+                    let v = float pEdges.[c] / 255.0
+                    if v >= config.Threshold then
+                        let mutable r = Regression2d.Empty
+
+                        let inline regressionStable (r : Regression2d) =
+                            if r.Count >= 15 then
+                                r.GetQuality() > config.MinStability
+                            else
+                                false
+
+                        let queue = System.Collections.Generic.List()
+                        let queueHash = System.Collections.Generic.HashSet()
+
+
+                        do
+                            queue.HeapEnqueue(cmp, struct(v, c))
+                            queueHash.Add c |> ignore
+
+                            while r.Count < config.MaxGuessCount && queue.Count > 0 && not (regressionStable r) do
+                                let struct(v, e) = queue.HeapDequeue(cmp)
+                                r <- r.Add(V2d e + V2d.Half, v)
+
+                                for no in neighbours do
+                                    let n = e + no
+                                    if n.AllGreaterOrEqual 0 && n.AllSmaller size then
+                                        if queueHash.Add n then
+                                            let v = float pEdges.[n] / 255.0
+                                            if v >= config.GrowThreshold then
+                                                queue.HeapEnqueue(cmp, struct(v, n))
+
+                        if regressionStable r then
+                            match r.TryGetPlaneInfo() with
+                            | Some info when abs (info.Plane.Height(V2d c + V2d.Half)) <= config.Tolerance ->
+                                let mutable info = info
+                                r <- Regression2d.Empty
+
+                                queue.Clear()
+                                queueHash.Clear()
+                                queue.HeapEnqueue(cmp, struct(v, c))
+                                queueHash.Add c |> ignore
+
+                                let all = System.Collections.Generic.HashSet()
+
+                                let mutable sum = 0.0
+                                let mutable sumSq = 0.0
+
+                                while queue.Count > 0 do
+                                    let struct(vi,pi) = queue.HeapDequeue(cmp)
+                                        
+                                    let err = abs (info.Plane.Height (V2d pi + V2d.Half))
+                                    if vi >= config.GrowThreshold && err <= config.Tolerance then
+                                        sum <- sum + vi
+                                        sumSq <- sumSq + sqr vi
+                                        all.Add pi |> ignore
+                                        r <- r.Add(V2d pi + V2d.Half, vi)
+                                        if regressionStable r then
+                                            match r.TryGetPlaneInfo() with
+                                            | Some i -> info <- i
+                                            | None -> ()
+                                        for no in neighbours do
+                                            let n = pi + no
+                                            if n.AllGreaterOrEqual 0 && n.AllSmaller size then
+                                                if queueHash.Add n then 
+                                                    let vn = float pEdges.[n] / 255.0
+                                                    queue.HeapEnqueue(cmp, struct(vn, n))
+
+                                if all.Count > 1 then
+                                    let ray = Ray2d(info.Center, info.XAxis)
+                                    let mutable tRange = Range1d.Invalid
+
+                                    for a in all do
+                                        let t = ray.GetClosestPointTOn (V2d a + V2d.Half)
+                                        tRange.ExtendBy t
+                                        pEdges.[a] <- 0uy
+
+                                    if tRange.Size >= config.MinLength then
+                                        let avg = sum / float all.Count
+                                        //let avgSq = sumSq / float all.Count
+
+                                        let var = (sumSq - float all.Count * sqr avg) / float (all.Count - 1)
+
+                                        let line = Line2d(ray.GetPointOnRay tRange.Min, ray.GetPointOnRay tRange.Max)
+
+                                        lines.Add {
+                                            regression = r
+                                            info = info
+                                            avgResponse = avg
+                                            stddev = sqrt var
+                                            line = line
+                                        }
+                            | _ ->
+                                ()
+                    else
+                        ()
+                ) |> ignore
+
+            )
+            Log.stop()
+
+
+            lines.ToArray()
+
+
+    let private mergeLines (config : LineDetectionConfig) (lines : DetectedLine[])  =
+        let radius = config.MergeRadius
+
         let linePoints = Array.zeroCreate (2 * lines.Length)
         let mutable oi = 0
         for i in 0 .. lines.Length - 1 do
@@ -828,18 +1059,46 @@ module LineDetector =
                             graph.Add(li, LinePart.Line, ri, LinePart.Line)
                         
 
-        let tryMerge (l : Regression2d) (ll : Line2d) (r : Regression2d) (rl : Line2d) =
+        let tryMerge (config : LineDetectionConfig) (l : Regression2d) (ll : Line2d) (r : Regression2d) (rl : Line2d) =
+            
             let h = l + r
+
+            //let lq = l.GetQuality()
+            //let rq = r.GetQuality()
+            //let hq = h.GetQuality()
+
+            //if hq > lq && hq > rq then
+            //    let lInfo = l.TryGetPlaneInfo() |> Option.get
+            //    let rInfo = r.TryGetPlaneInfo() |> Option.get
+            //    let hInfo = h.TryGetPlaneInfo() |> Option.get
+                
+            //    let angle = Constant.DegreesPerRadian * acos (abs (Vec.dot lInfo.YAxis rInfo.YAxis) |> min 1.0)
+            //    if angle < 5.0 then
+                   
+            //        let ray = Ray2d(hInfo.Center, hInfo.XAxis)
+            //        let mutable tRange = Range1d.Invalid
+            //        tRange.ExtendBy(ray.GetClosestPointTOn ll.P0)
+            //        tRange.ExtendBy(ray.GetClosestPointTOn ll.P1)
+            //        tRange.ExtendBy(ray.GetClosestPointTOn rl.P0)
+            //        tRange.ExtendBy(ray.GetClosestPointTOn rl.P1)
+
+            //        Some (h, hInfo, Line2d(ray.GetPointOnRay tRange.Min, ray.GetPointOnRay tRange.Max), hq)
+            //    else
+            //        None
+            //else
+            //    None
             match l.TryGetPlaneInfo() with
             | Some lInfo ->
-                let lScore = lInfo.Quality //lInfo.StdDev.X / lInfo.StdDev.Y
                 match r.TryGetPlaneInfo() with
                 | Some rInfo ->
-                    let rScore = rInfo.Quality // rInfo.StdDev.X / rInfo.StdDev.Y
                     match h.TryGetPlaneInfo() with
                     | Some hInfo ->
-                        let hScore = hInfo.Quality // hInfo.StdDev.X / hInfo.StdDev.Y
-                        if hScore >= lScore && hScore >= rScore then
+                        let lAngle = acos (abs (Vec.dot lInfo.XAxis hInfo.XAxis)) 
+                        let rAngle = acos (abs (Vec.dot rInfo.XAxis hInfo.XAxis)) 
+                        let lDist = max (abs (hInfo.Plane.Height ll.P0)) (abs (hInfo.Plane.Height ll.P1))
+                        let rDist = max (abs (hInfo.Plane.Height rl.P0)) (abs (hInfo.Plane.Height rl.P1))
+
+                        if lDist < config.Tolerance && rDist < config.Tolerance && lAngle < lInfo.AngularError && rAngle < rInfo.AngularError then
                             let ray = Ray2d(hInfo.Center, hInfo.XAxis)
                             let mutable tRange = Range1d.Invalid
                             tRange.ExtendBy(ray.GetClosestPointTOn ll.P0)
@@ -850,37 +1109,42 @@ module LineDetector =
                             Some (h, hInfo, Line2d(ray.GetPointOnRay tRange.Min, ray.GetPointOnRay tRange.Max))
                         else
                             None
+                            
+
                     | None ->
                         None
                 | None ->
                     None
-            | None ->
+            | _ ->
                 None
 
         let output = System.Collections.Generic.List()
 
         let top = System.Collections.Generic.Queue()
 
-        let rec traverse (visited : System.Collections.Generic.HashSet<int>) (li : int) (lInfo : DetectedLine) =
+        let rec traverse (config : LineDetectionConfig) (visited : System.Collections.Generic.HashSet<int>) (li : int) (lInfo : DetectedLine) =
             if visited.Add li then
                 let conn = graph.GetNeighbours li
                 if conn.Length = 0 then
                     output.Add lInfo
                 else
                     let merged =
-                        conn |> Array.tryPick (fun (KeyValue(ri, _k)) ->
+                        let d = lInfo.info.XAxis
+                        conn 
+                        |> Array.sortBy (fun c -> acos (abs (Vec.dot d lines.[c.Key].info.XAxis) |> min 1.0))
+                        |> Array.choose (fun (KeyValue(ri, _k)) ->
                             if not (visited.Contains ri) then
                                 let rInfo = lines.[ri]
-                                match tryMerge lInfo.regression lInfo.line rInfo.regression rInfo.line with
+                                match tryMerge config lInfo.regression lInfo.line rInfo.regression rInfo.line with
                                 | Some(hReg, hInfo, hLine) -> 
                                     Some(ri, hReg, hInfo, hLine)
                                 | None -> None
                             else
                                 None
                         )
-
-                    match merged with
-                    | Some (ri, hReg, hInfo, hLine) ->
+                    if merged.Length > 0 then   
+                        let (ri, hReg, hInfo, hLine) = merged |> Array.maxBy (fun (_,_,i,_) -> i.Quality)
+               
                         let (lint, rint) =
                             graph.TryGetConnection(li, ri) |> Option.get
 
@@ -903,8 +1167,8 @@ module LineDetector =
                         graph.Remove ri |> ignore
                         visited.Remove li |> ignore
                         visited.Add ri |> ignore
-                        traverse visited li { regression = hReg; info = hInfo; line = hLine; stddev = lInfo.stddev; avgResponse = lInfo.avgResponse }
-                    | None ->
+                        traverse config visited li { regression = hReg; info = hInfo; line = hLine; stddev = lInfo.stddev; avgResponse = lInfo.avgResponse }
+                    else
                         output.Add lInfo
                         for KeyValue(ri, _) in conn do
                             top.Enqueue ri
@@ -916,20 +1180,24 @@ module LineDetector =
             while top.Count > 0 do
                 let ri = top.Dequeue()
                 let rInfo = lines.[ri]
-                traverse visited ri rInfo
+                traverse config visited ri rInfo
             let lInfo = lines.[i]
-            traverse visited i lInfo
+            traverse config visited i lInfo
 
 
         CSharpList.toArray output
 
 
     let run (config : LineDetectionConfig) (image : PixImage<byte>) =
-        image
-        |> detectLines config
-        |> mergeLines config.MergeRadius
+       
+        let rawLines = detectLinesPar config image
+        
+        Log.startTimed "merge lines"
+        let merged = mergeLines config rawLines
+        Log.stop()
+
+        merged
         |> Array.filter (fun l -> l.info.Quality >= config.MinQuality)
-        //|> Array.filter (fun l -> Vec.distance l.line.P0 l.line.P1 >= 100.0)
 
     
 
