@@ -1,5 +1,5 @@
 ﻿open Aardvark.Base
-open LineDetector
+open Aardvark.LineDetection
 open System.IO
 
 let trySeparate (m : Matrix<float>) =
@@ -177,17 +177,29 @@ let main _args =
         )
 
 
+     //0: detection 7952x5304 ............................................. 10.782 s
+     //0: detection 4912x3264 .............................................. 1.400 s
+     //0: detection 4912x3264 .............................................. 1.143 s
+     //0: detection 4928x3264 .............................................. 1.184 s
+     //0: detection 1600x1200 .............................................. 0.581 s
+     //0: detection 4000x1800 .............................................. 2.295 s
+     //0: detection 6000x4000 .............................................. 2.296 s
+     //0: detection 6000x4000 .............................................. 2.085 s
+     //0: detection 5472x3648 .............................................. 1.655 s
+     //0: detection 4608x2074 .............................................. 0.739 s
+
 
     for (name, img) in testImages do
+        let img = img.ToPixImage<byte>()
         Log.startTimed "detection %dx%d" img.Size.X img.Size.Y
-        let cfg = { LineDetectionConfig.Default with MinQuality = 0.8; Threads = 4 }
-        let lines = LineDetector.run cfg (img.ToPixImage<byte>())
-        Log.line "%d lines found" lines.Length
+        let cfg = { LineDetectionConfig.Default with MinQuality = 0.8 }
+        let lines = LineDetector.detect cfg Unchecked.defaultof<_> img
+        //Log.line "%d lines found" lines.Length
         let lines = 
             lines |> Array.filter (fun d ->
-                d.info.AngularError * Constant.DegreesPerRadian < 8.0
+                d.info.AngularError * Constant.DegreesPerRadian < 10.0
             )
-        Log.line "%d lines filtered" lines.Length
+        //Log.line "%d lines" lines.Length
         Log.stop()
 
         let img = img.ToPixImage<byte>(Col.Format.RGBA)
@@ -200,7 +212,7 @@ let main _args =
             //let q = abs d.info.StdDev.Y / cfg.Tolerance
             //let color = HeatMap.color q
             let n = d.line.Plane2d.Normal |> Vec.normalize
-            let color = HeatMap.color (d.info.AngularError * Constant.DegreesPerRadian / 15.0)
+            //let color = HeatMap.color (d.info.AngularError * Constant.DegreesPerRadian / 15.0)
             for o in [V2d.Zero;-n * Constant.Sqrt2Half;n* Constant.Sqrt2Half] do 
                 mat.SetLine(o+d.line.P0, o+d.line.P1, color)
 

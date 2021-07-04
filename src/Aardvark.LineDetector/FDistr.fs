@@ -1,4 +1,4 @@
-﻿namespace LineDetector
+﻿namespace Aardvark.LineDetection
 
 open Aardvark.Base
 

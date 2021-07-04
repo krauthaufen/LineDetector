@@ -15,10 +15,10 @@
   </PropertyGroup>
   <ItemGroup>
     <None Include="paket.references" />
-	<EmbeddedResource Include="resources\forced-1024.bin" />
-    <Compile Include="FDistr.fs" />
-    <Compile Include="LineDetector.fs" />
     <Compile Include="Program.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Aardvark.LineDetector\Aardvark.LineDetector.fsproj" />
   </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>
