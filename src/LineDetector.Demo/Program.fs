@@ -102,66 +102,7 @@ module HeatMap =
 
 [<EntryPoint>]
 let main _args =
-    
-    //let filter =
-    //    let s = V2l.II * 5L
-    //    let m = Matrix<float>(s)
-    //    let center = s / 2L
-    //    m.SetByCoord (fun (c : V2l) ->
-    //        let d = V2d (c - center) / (0.5 * V2d s)
-
-    //        exp -d.LengthSquared
-
-    //    )
-
-    //let filter =
-    //    Matrix<float>([|
-    //        0.0; -1.0; 0.0
-    //        -1.0;  4.0; -1.0
-    //        0.0; -1.0;  0.0
-    //    |], 3L, 3L)
-
-    //match trySeparate filter with
-    //| Some (a, b) ->
-
-    //    let m = Matrix<float>(V2l(a.Size, b.Size))
-    //    m.SetByCoord(fun (c : V2l) ->
-    //        a.[c.Y]*b.[c.X]
-    //    ) |> ignore
-
-    //    printfn "original: "
-    //    for y in 0L .. filter.SY - 1L do
-    //        for x in 0L .. filter.SX - 1L do
-    //            printf "% .3f " filter.[x,y]
-    //        printfn ""
-
-    //    printfn "separate: "
-
-    //    printfn " a: %s" (Array.init (int a.S) (fun i -> sprintf "% .3f" a.[i]) |> String.concat " ")
-    //    printfn " b: %s" (Array.init (int b.S) (fun i -> sprintf "% .3f" b.[i]) |> String.concat " ")
-
-    //    printfn "outer(a,b): "
-
-    //    for y in 0L .. m.SY - 1L do
-    //        for x in 0L .. m.SX - 1L do
-    //            printf "% .3f " m.[x,y]
-    //        printfn ""
-
-    //    //let a = V3d a
-    //    //let b = V3d b
-    //    //Log.warn "%A" a
-    //    //Log.warn "%A" b
-
-    //    //let test = Vec.Outer(a,b)
-    //    //Log.warn "%A" test
-
-    //    ()
-    //| None ->
-    //    ()
-
-    //exit 0
-
-
+   
     Aardvark.Init()
 
     let inDir = @"C:\Users\Schorsch\Desktop\LineDetector"
@@ -177,17 +118,6 @@ let main _args =
         )
 
 
-     //0: detection 7952x5304 ............................................. 10.782 s
-     //0: detection 4912x3264 .............................................. 1.400 s
-     //0: detection 4912x3264 .............................................. 1.143 s
-     //0: detection 4928x3264 .............................................. 1.184 s
-     //0: detection 1600x1200 .............................................. 0.581 s
-     //0: detection 4000x1800 .............................................. 2.295 s
-     //0: detection 6000x4000 .............................................. 2.296 s
-     //0: detection 6000x4000 .............................................. 2.085 s
-     //0: detection 5472x3648 .............................................. 1.655 s
-     //0: detection 4608x2074 .............................................. 0.739 s
-
 
     for (name, img) in testImages do
         let img = img.ToPixImage<byte>()
@@ -195,15 +125,16 @@ let main _args =
         let cfg = { LineDetectionConfig.Default with MinQuality = 0.8 }
         let lines = LineDetector.detect cfg Unchecked.defaultof<_> img
         //Log.line "%d lines found" lines.Length
-        let lines = 
-            lines |> Array.filter (fun d ->
-                d.info.AngularError * Constant.DegreesPerRadian < 10.0
-            )
+        //let lines = 
+        //    lines |> Array.filter (fun d ->
+        //        d.info.AngularError * Constant.DegreesPerRadian < 10.0
+        //    )
         //Log.line "%d lines" lines.Length
         Log.stop()
 
-        let img = img.ToPixImage<byte>(Col.Format.RGBA)
+        let img = PixImage<byte>(Col.Format.RGBA, img.Size) //img.ToPixImage<byte>(Col.Format.RGBA)
         let mat = img.GetMatrix<C4b>()
+        mat.Set C4b.Black |> ignore
 
         let rand = RandomSystem()
         for li, d in Seq.indexed lines do

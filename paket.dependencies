@@ -1,20 +1,14 @@
 source https://api.nuget.org/v3/index.json
 storage none
-framework: netstandard2.0, netcoreapp3.1
+framework: netstandard2.0, netcoreapp3.1, net5.0
 
-nuget FSharp.Core                      >= 4.7.0 lowest_matching: true
-nuget Aardvark.Base                    ~> 5.1.11
-nuget Aardvark.Base.Essentials         ~> 5.1.11
-nuget Aardvark.Base.FSharp             ~> 5.1.11
-nuget Aardvark.Base.Runtime            ~> 5.1.11
-nuget Aardvark.Base.Tensors            ~> 5.1.11
-
-nuget Aardvark.Rendering               ~> 5.1.11
-nuget Aardvark.SceneGraph              ~> 5.1.11
-nuget Aardvark.Application             ~> 5.1.11
-nuget Aardvark.Application.Utilities   ~> 5.1.11
-
-nuget Aardvark.Geometry.PointTree      ~> 5.1.11
+nuget FSharp.Core                      >= 5.0.0 lowest_matching: true
+nuget Aardvark.Base                    ~> 5.1.22
+nuget Aardvark.Base.Essentials         ~> 5.1.22
+nuget Aardvark.Base.FSharp             ~> 5.1.22
+nuget Aardvark.Base.Runtime            ~> 5.1.22
+nuget Aardvark.Base.Tensors            ~> 5.1.22
+nuget Aardvark.Geometry                ~> 5.1.22
 
 
 group Build

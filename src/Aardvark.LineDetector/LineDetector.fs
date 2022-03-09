@@ -24,7 +24,7 @@ type LineDetectionConfig =
         {
             Threshold           = 0.4
             GrowThreshold       = 0.1
-            Tolerance           = 3.5
+            Tolerance           = 6.5
             MinLength           = 10.0
             MinStability        = 0.8
             MaxGuessCount       = 20
@@ -147,6 +147,7 @@ module LineDetector =
     let private detectLinesPar (config : LineDetectionConfig) (ct : CancellationToken) (image : PixImage<byte>) =  
         let threads = if config.Threads <= 0 then System.Environment.ProcessorCount else config.Threads
         
+
         let inline iter (size : V2i) (action : V2i -> unit) =
             if threads = 1 then
                 for y in 0 .. size.Y - 1 do
@@ -166,9 +167,9 @@ module LineDetector =
         //Log.startTimed "finding lines"
         NativeMatrix.using (edges.GetChannel 0L) (fun pEdges ->
             let size = V2i pEdges.Size
-            let coords = Dither.getCoords size
             iter size (fun (c : V2i) ->
                 let v = float pEdges.[c] / 255.0
+
                 if v >= config.Threshold then
                     let mutable r = WeightedRegression2d.Empty
 
@@ -239,7 +240,7 @@ module LineDetector =
                                     let t = ray.GetClosestPointTOn (V2d a + V2d.Half)
                                     tRange.ExtendBy t
                                     pEdges.[a] <- 0uy
-
+                                    
                                 if tRange.Size >= config.MinLength then
                                     let line = Line2d(ray.GetPointOnRay tRange.Min, ray.GetPointOnRay tRange.Max)
 
@@ -398,11 +399,13 @@ module LineDetector =
 
     let detect (config : LineDetectionConfig) (ct : CancellationToken) (image : PixImage<byte>) =
        
+        Log.startTimed "detect lines"
         let rawLines = detectLinesPar config ct image
-        
-        //Log.startTimed "merge lines"
+        Log.stop()
+
+        Log.startTimed "merge lines"
         let merged = mergeLines config ct rawLines
-        //Log.stop()
+        Log.stop()
      
         merged
         |> Array.filter (fun l -> l.info.Quality >= config.MinQuality)

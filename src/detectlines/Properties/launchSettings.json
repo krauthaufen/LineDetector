@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "detectlines": {
+      "commandName": "Project",
+      "commandLineArgs": "\"C:\\Users\\Schorsch\\Desktop\\LineDetector\\DSC_4549.JPG\" -o \"C:\\Users\\Schorsch\\Desktop\\LineDetector\""
+    }
+  }
+}
